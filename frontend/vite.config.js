@@ -1,25 +1,27 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
-import VueSetupExtend from 'vite-plugin-vue-setup-extend'
 import AutoImport from 'unplugin-auto-import/vite'
 import Components from 'unplugin-vue-components/vite'
-import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
+import { NaiveUiResolver } from 'unplugin-vue-components/resolvers'
 
 export default defineConfig({
   plugins: [
     vue(),
-    VueSetupExtend(),
     AutoImport({
-      resolvers: [ElementPlusResolver()]
+      imports: [
+        'vue',
+        'vue-router'
+      ],
+      dts: true
     }),
     Components({
-      resolvers: [ElementPlusResolver()]
+      resolvers: [NaiveUiResolver()],
+      dts: true
     })
   ],
   resolve: {
     alias: {
-      '@': '/src',
-      '~': '/src/assets'
+      '@': '/src'
     }
   },
   define: {
