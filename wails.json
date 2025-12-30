@@ -1,0 +1,31 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "sitebackup",
+  "outputfilename": "sitebackup",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "info": {
+    "productName": "网页备份工具",
+    "productVersion": "1.0.0",
+    "copyright": "Copyright © 2025",
+    "comments": "完整备份网页内容，支持隐私清理功能",
+    "companyName": "SiteBackup"
+  },
+  "icon": "build/appicon.png",
+  "windows": {
+    "icon": "build/windows/icon.ico",
+    "wailsjs": {
+      "generateJS": true
+    }
+  },
+  "macos": {
+    "icon": "build/appicon.png",
+    "bundleId": "com.sitebackup.app",
+    "category": "public.app-category.productivity"
+  },
+  "linux": {
+    "icon": "build/appicon.png"
+  }
+}
