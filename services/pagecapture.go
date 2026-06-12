@@ -466,10 +466,51 @@ type DownloadResult struct {
 	Error     error
 }
 
-// CapturePage 抓取页面内容
+// CapturePage 抓取页面内容（自取主页面 HTML）
 func (s *PageCaptureService) CapturePage(targetURL string, options CaptureOptions) (*CaptureResult, error) {
-	startTime := time.Now()
+	// 公共初始化
+	if err := s.initCapture(targetURL, options); err != nil {
+		return nil, err
+	}
 
+	// 下载主页面（带重试机制）
+	htmlContent, resp, err := s.downloadPageWithRetryAndEncoding(targetURL, 3, options.ForceEncoding)
+	if err != nil {
+		return nil, fmt.Errorf("下载主页面失败: %v", err)
+	}
+
+	return s.captureFromHTML(targetURL, htmlContent, resp, options)
+}
+
+// CapturePageWithHTML 接受外部预取的 HTML 内容
+// 典型场景：MCP host 已用 puppeteer-mcp 拿到 HTML，绕开 SiteBackup 自身的 fetch
+// （解决反爬虫 / Cloudflare / JS 渲染等问题）
+func (s *PageCaptureService) CapturePageWithHTML(targetURL string, htmlContent string, options CaptureOptions) (*CaptureResult, error) {
+	if strings.TrimSpace(htmlContent) == "" {
+		return nil, fmt.Errorf("htmlContent 不能为空")
+	}
+
+	// 公共初始化
+	if err := s.initCapture(targetURL, options); err != nil {
+		return nil, err
+	}
+
+	// 构造一个最小可用的 *http.Response，让后续逻辑能照常工作
+	parsedURL, _ := url.Parse(targetURL)
+	if parsedURL.Scheme == "" {
+		parsedURL.Scheme = "https"
+	}
+	resp := &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Request:    &http.Request{URL: parsedURL, Header: http.Header{}},
+	}
+
+	return s.captureFromHTML(targetURL, htmlContent, resp, options)
+}
+
+// initCapture 公共初始化：ctx、URL 校验、temp 目录、debug、超时、状态重置
+func (s *PageCaptureService) initCapture(targetURL string, options CaptureOptions) error {
 	// 创建可取消的上下文
 	ctx, cancel := context.WithCancel(context.Background())
 	s.ctx = ctx
@@ -478,36 +519,29 @@ func (s *PageCaptureService) CapturePage(targetURL string, options CaptureOption
 	// 验证URL
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
-		return nil, fmt.Errorf("无效的URL格式: %v", err)
+		cancel()
+		return fmt.Errorf("无效的URL格式: %v", err)
 	}
 	if parsedURL.Scheme == "" {
 		parsedURL.Scheme = "https"
 		targetURL = parsedURL.String()
 		parsedURL, _ = url.Parse(targetURL)
 	}
-
 	s.baseURL = parsedURL
+
 	s.maxFiles = options.MaxFiles
 	if s.maxFiles <= 0 {
 		s.maxFiles = 200
 	}
-
-	// 保存当前选项
 	s.currentOptions = options
-
-	// 临时启用调试模式来诊断问题
 	s.debug = true
-
-	// 重置所有状态 - 确保每次下载都是全新开始
 	s.resetState()
-
-	// 立即更新初始进度状态
 	s.updateProgress("analyzing", "开始分析页面...", 0)
 
-	// 设置超时 - 对于大文件需要更长时间
+	// 设置超时
 	timeout := options.Timeout
 	if timeout < 120 {
-		timeout = 120 // 最少2分钟
+		timeout = 120
 	}
 	s.client.Timeout = time.Duration(timeout) * time.Second
 	s.debugPrintf("设置HTTP超时: %d 秒\n", timeout)
@@ -515,20 +549,26 @@ func (s *PageCaptureService) CapturePage(targetURL string, options CaptureOption
 	// 创建临时目录
 	tempDir, err := os.MkdirTemp("", "page_capture_*")
 	if err != nil {
-		return nil, fmt.Errorf("创建临时目录失败: %v", err)
+		cancel()
+		return fmt.Errorf("创建临时目录失败: %v", err)
 	}
 	s.tempDir = tempDir
-	defer os.RemoveAll(tempDir)
+	return nil
+}
 
-	// 下载主页面（带重试机制）
-	htmlContent, resp, err := s.downloadPageWithRetryAndEncoding(targetURL, 3, options.ForceEncoding)
-	if err != nil {
-		return nil, fmt.Errorf("下载主页面失败: %v", err)
-	}
+// captureFromHTML 公共后处理：HTML 解析、资源下载、清理、归档
+func (s *PageCaptureService) captureFromHTML(targetURL string, htmlContent string, resp *http.Response, options CaptureOptions) (*CaptureResult, error) {
+	startTime := time.Now()
+	// 退出时清理临时目录
+	defer func() {
+		if s.tempDir != "" {
+			os.RemoveAll(s.tempDir)
+		}
+	}()
 
 	// 检查是否发生了重定向，如果是则更新 baseURL
 	finalURL := resp.Request.URL
-	if finalURL.String() != targetURL {
+	if finalURL != nil && finalURL.String() != targetURL {
 		s.debugPrintf("检测到重定向: %s -> %s\n", targetURL, finalURL.String())
 		s.baseURL = finalURL
 		s.debugPrintf("已更新 baseURL 为: %s\n", s.baseURL.String())
@@ -552,8 +592,6 @@ func (s *PageCaptureService) CapturePage(targetURL string, options CaptureOption
 		return nil, fmt.Errorf("保存文件失败: %v", err)
 	}
 	s.debugPrintf("所有文件保存完成\n")
-
-	// 更新进度：保存文件
 	s.updateProgress("saving", "保存文件中...", 90)
 
 	// 创建ZIP

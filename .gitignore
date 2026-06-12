@@ -26,3 +26,4 @@ dist-ssr
 *sitebackup-dev.exe*
 
 build
+bin/

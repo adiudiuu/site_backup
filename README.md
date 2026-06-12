@@ -170,6 +170,139 @@ make build-mac
 wails build
 ```
 
+## 🤖 MCP Server（AI 工具集成）
+
+> **v1.1+ 新增**：SiteBackup 同时以 [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server 形式暴露能力，可被 Claude Desktop、Cursor、Continue 等 AI 客户端作为工具调用。
+
+### 为什么做 MCP
+
+- **反爬虫绕过**：当 SiteBackup 自身的 `http.Client` 抓不到目标（Cloudflare、JS 渲染、登录墙），可以让 MCP host 先用 `puppeteer-mcp` / `firecrawl-mcp` 拿 HTML，再传给 SiteBackup 做解析和打包
+- **AI 工作流集成**：让 LLM Agent 能直接 "帮我把这个站打包" / "抓取并总结" / "对比两个版本"
+- **能力组合**：SiteBackup 专注解析+清理+打包，反爬交给 host 已有的更强工具
+
+### 构建 MCP Server
+
+```bash
+# 当前平台
+make build-mcp
+
+# 跨平台
+make build-mcp-win
+make build-mcp-linux
+make build-mcp-mac
+
+# 产物路径：bin/sitebackup-mcp[.exe]
+```
+
+### 注册到 Claude Desktop
+
+编辑 Claude Desktop 配置文件：
+- **Windows**：`%APPDATA%\Claude\claude_desktop_config.json`
+- **macOS**：`~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Linux**：`~/.config/Claude/claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "sitebackup": {
+      "command": "D:\AAAA\mdzz\site_backup\bin\sitebackup-mcp.exe"
+    }
+  }
+}
+```
+
+重启 Claude Desktop 即可在工具列表看到 `capture_page`、`list_capabilities` 等工具。
+
+### 暴露的工具
+
+| 工具 | 说明 |
+|---|---|
+| `capture_page` | 抓取整页 HTML 及所有子资源，5 类隐私清理，ZIP 打包 |
+| `get_capture_progress` | 进度查询（保留扩展点，MCP 同步模式下不常用） |
+| `list_capabilities` | 列出能力清单与组合用法示例 |
+
+### `capture_page` 参数
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|---|---|---|---|---|
+| `url` | string | ✅ | — | 目标 URL |
+| `html` | string | ❌ | — | 预取 HTML（来自 puppeteer-mcp 等），非空时跳过内部 fetch |
+| `options.includeImages` | bool | ❌ | `true` | 备份图片 |
+| `options.includeStyles` | bool | ❌ | `true` | 备份 CSS |
+| `options.includeScripts` | bool | ❌ | `true` | 备份 JS |
+| `options.includeFonts` | bool | ❌ | `true` | 备份字体 |
+| `options.includeVideos` | bool | ❌ | `true` | 备份视频 |
+| `options.removeAnalytics` | bool | ❌ | `true` | 剥离 Google Analytics / 百度统计 / CNZZ 等 |
+| `options.removeTracking` | bool | ❌ | `true` | 剥离 Facebook Pixel / TikTok Pixel 等 |
+| `options.removeAds` | bool | ❌ | `true` | 剥离 Google Ads / DoubleClick 等 |
+| `options.removeTagManager` | bool | ❌ | `true` | 剥离 Google Tag Manager |
+| `options.removeMaliciousTags` | bool | ❌ | `true` | 剥离恶意跳转/劫持标签 |
+| `options.timeout` | int | ❌ | `120` | 超时（秒），60-300 |
+| `options.maxFiles` | int | ❌ | `200` | 最大文件数，10-1000 |
+| `options.maxConcurrency` | int | ❌ | `10` | 并发下载数，1-50 |
+| `options.forceEncoding` | string | ❌ | 自动 | 强制编码 (UTF-8/GBK/GB18030/Big5/...) |
+
+### 与 puppeteer-mcp 组合（推荐）
+
+先用 puppeteer-mcp 抓 HTML（带 JS 渲染+反爬绕过），再传给 sitebackup 做解析打包：
+
+```
+用户：帮我抓 https://example.com，整站打包，剔除所有跟踪代码
+
+Agent:
+  1. puppeteer_mcp.browse({url: "https://example.com"})
+     → html
+  2. sitebackup.capture_page({
+       url: "https://example.com",
+       html: html,
+       options: {removeAnalytics: true, removeTracking: true}
+     })
+     → {zipPath: "/tmp/webpage_xxx.zip", filesCount: 47, ...}
+  3. host 自动 Read ZIP 内容
+  4. LLM 总结/分析
+```
+
+### 在 Claude Desktop 中实际效果
+
+启动 Claude Desktop 后，对话框里输入：
+
+> 用 sitebackup 工具抓取 https://example.com，关闭 GA 和 Facebook Pixel，保存到桌面
+
+Claude 会自动调用 `capture_page` 并返回 ZIP 路径，然后调用系统的打开文件管理器（如果启用了 host 端的 OpenDirectory 工具）。
+
+### 架构示意
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  MCP Host (Claude Desktop / Cursor / 自研 Agent)            │
+│  ┌─────────────────────┐  ┌─────────────────────┐           │
+│  │  puppeteer-mcp      │  │  sitebackup-mcp     │           │
+│  │  (反爬/JS渲染)      │→→│  (解析/清理/打包)    │           │
+│  └─────────────────────┘  └──────────┬──────────┘           │
+└──────────────────────────────────────┼──────────────────────┘
+                                       │ stdio JSON-RPC
+                              ┌────────▼─────────┐
+                              │ bin/sitebackup-  │
+                              │     mcp.exe      │
+                              │ (12.9MB 静态二进制)│
+                              └────────┬─────────┘
+                                       │
+                          ┌────────────▼────────────┐
+                          │ services.PageCaptureService │
+                          │  (与 Wails 桌面端共用)        │
+                          └─────────────────────────┘
+```
+
+### 开发者：手动测试
+
+```bash
+# 终端 A：启动 MCP server
+make build-mcp && ./bin/sitebackup-mcp.exe
+
+# 终端 B：用 jq/curl 模拟 MCP 客户端（需要 stdio 桥接工具，如 mcp-cli）
+# 或直接在 Claude Desktop 里使用
+```
+
 ## 📖 使用指南
 
 ### 基本使用步骤
